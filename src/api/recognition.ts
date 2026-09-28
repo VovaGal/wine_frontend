@@ -2,30 +2,43 @@ import { config } from "../config";
 import type { RecognitionCreated, RecognitionStatus, Wine } from "../types";
 import { demoResult } from "../data/demoRecognition";
 
-/* ---------- Формы ответов бэкенда (локально, types.ts не меняем) ---------- */
+/* ---------- Формы ответов бэкенда (зеркало pydantic-моделей) ---------- */
+
+type BackendStatus =
+  | "accepting_results"
+  | "waiting_for_ocr"
+  | "waiting_for_cv"
+  | "resolving"
+  | "completed"
+  | "failed";
 
 interface BackendWine {
   id: number;
   slug: string;
+  wine_id: string;
   name: string;
-  country?: string | null;
-  region?: string | null;
-  winery?: string | null;
-  rating?: number | null;
-  description?: string | null;
-  source_url?: string | null;
-  created_at?: string;
-  updated_at?: string;
+  producer: string;
+  region: string;
+  style: string[];
+  color: string;
+  grapes: string[];
+  year: number | null;
+  alcohol_percent: number | null;
+  image_url: string | null;
+  aliases: Array<Record<string, unknown>>;
+  search_text: string;
+  created_at: string;
+  updated_at: string;
 }
 
 interface BackendTask {
   task_id: string;
-  status: string;
-  detected_wine?: BackendWine | null;
-  alternatives?: BackendWine[] | null;
-  error?: string | null;
-  finished_at?: string | null;
-  elapsed_time?: number | null;
+  status: BackendStatus;
+  detected_wine: BackendWine | null;
+  alternatives: BackendWine[];
+  error: string | null;
+  finished_at: string | null;
+  elapsed_time: number | null;
 }
 
 /* ---------- Вспомогательное ---------- */
@@ -70,43 +83,61 @@ function withMime(file: File): File {
   return type ? new File([file], file.name, { type }) : file;
 }
 
+/* ---------- Маппинг бэкенд -> фронтовые типы ---------- */
+
 function toWine(w: BackendWine): Wine {
+  const style = w.style.filter(Boolean).join(", ");
+  const grapes = w.grapes.filter(Boolean);
+
   return {
     id: w.id,
     external_id: w.slug,
     name: w.name,
-    country: w.country ?? "",
-    region: w.region ?? "",
-    winery: w.winery ?? "",
-    // Бэкенд отдаёт 0.0 для вин без оценки — на фронте это "нет рейтинга"
-    rating: typeof w.rating === "number" && w.rating > 0 ? w.rating : null,
-    description: w.description ?? "",
-    source_url: w.source_url ?? "",
+    country: "", // в WineDTO страны нет
+    region: w.region,
+    winery: w.producer,
+    rating: null, // в WineDTO рейтинга нет, не выдумываем
+    description: "", // описания тоже нет
+    source_url: "", // ссылки на источник тоже нет
+    image_url: w.image_url,
+    grapes: grapes.length > 0 ? grapes : null,
+    vintage: w.year,
+    style: style || null,
   };
 }
 
+/** Все промежуточные стадии воркера для фронта — просто "processing". */
+function toFrontStatus(status: BackendStatus): string {
+  return status === "completed" || status === "failed"
+    ? status
+    : "processing";
+}
+
 function toRecognitionStatus(task: BackendTask): RecognitionStatus {
-  const detected = task.detected_wine ?? null;
-  const alternatives = (task.alternatives ?? []).map(toWine);
-  const finished = task.status === "completed";
+  const detected = task.detected_wine;
+  const alternatives = task.alternatives.map(toWine);
+  const completed = task.status === "completed";
+  const failed = task.status === "failed";
 
   return {
     task_id: task.task_id,
-    status: task.status,
+    status: toFrontStatus(task.status),
     detected_wine_slug: detected?.slug ?? null,
-    error: task.error ?? null,
+    error: failed
+      ? (task.error ?? "Не удалось распознать вино.")
+      : task.error,
     wine: detected ? toWine(detected) : null,
-    source_checked: finished,
-    source_wine_exists: finished ? detected !== null : null,
+    source_checked: completed,
+    source_wine_exists: completed ? detected !== null : null,
     fallback_message: null,
     similar_wines: alternatives,
-    decision: !finished
-      ? undefined
-      : detected
+    decision: completed
+      ? detected
         ? "matched"
         : alternatives.length > 0
           ? "ambiguous"
-          : "unresolved",
+          : "unresolved"
+      : undefined,
   };
 }
 

@@ -6,6 +6,6 @@ export default defineConfig({
   server: {
     // Local development only. Production should share an origin with FastAPI
     // or explicitly enable CORS on that server.
-    proxy: { '/recognition': { target: 'http://127.0.0.1:8000', changeOrigin: true } },
+    proxy: { '/recognition': { target: 'http://127.0.0.1:8080', changeOrigin: true } },
   },
 });

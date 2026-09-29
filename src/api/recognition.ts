@@ -10,6 +10,7 @@ type BackendStatus =
   | "waiting_for_cv"
   | "resolving"
   | "completed"
+  | "partially_resolved"
   | "failed";
 
 interface BackendWine {
@@ -106,38 +107,70 @@ function toWine(w: BackendWine): Wine {
   };
 }
 
-/** Все промежуточные стадии воркера для фронта — просто "processing". */
-function toFrontStatus(status: BackendStatus): string {
-  return status === "completed" || status === "failed"
-    ? status
-    : "processing";
+/** Бэкенд кладёт эту ошибку, когда ни один воркер не дал даже альтернатив. */
+const NO_RESULT_ERROR = "no_recognition_result";
+
+type Outcome = "processing" | "matched" | "partial" | "not_found" | "failed";
+
+/** Три исхода скана + служебные состояния. */
+function resolveOutcome(task: BackendTask): Outcome {
+  const hasAlternatives = task.alternatives.length > 0;
+
+  switch (task.status) {
+    case "completed":
+      if (task.detected_wine) return "matched";
+      return hasAlternatives ? "partial" : "not_found";
+
+    case "partially_resolved":
+      return hasAlternatives ? "partial" : "not_found";
+
+    case "failed":
+      // «Не нашли ничего» — это не сбой, а повод предложить добавить вино.
+      return task.error === NO_RESULT_ERROR ? "not_found" : "failed";
+
+    default:
+      // accepting_results / waiting_for_* / resolving
+      return "processing";
+  }
 }
 
+const FRONT_STATUS: Record<Outcome, string> = {
+  processing: "processing",
+  matched: "completed",
+  partial: "completed",
+  not_found: "completed",
+  failed: "failed",
+};
+
+const DECISION: Record<Outcome, RecognitionStatus["decision"]> = {
+  processing: undefined,
+  matched: "matched",
+  partial: "ambiguous",
+  not_found: "unresolved",
+  failed: undefined,
+};
+
 function toRecognitionStatus(task: BackendTask): RecognitionStatus {
-  const detected = task.detected_wine;
-  const alternatives = task.alternatives.map(toWine);
-  const completed = task.status === "completed";
-  const failed = task.status === "failed";
+  const outcome = resolveOutcome(task);
+  const done = outcome === "matched" || outcome === "partial" || outcome === "not_found";
+
+  // Основное вино показываем только при полном совпадении.
+  const detected = outcome === "matched" ? task.detected_wine : null;
 
   return {
     task_id: task.task_id,
-    status: toFrontStatus(task.status),
+    status: FRONT_STATUS[outcome],
     detected_wine_slug: detected?.slug ?? null,
-    error: failed
-      ? (task.error ?? "Не удалось распознать вино.")
-      : task.error,
+    error:
+      outcome === "failed"
+        ? (task.error ?? "Не удалось распознать вино.")
+        : null,
     wine: detected ? toWine(detected) : null,
-    source_checked: completed,
-    source_wine_exists: completed ? detected !== null : null,
+    source_checked: done,
+    source_wine_exists: done ? detected !== null : null,
     fallback_message: null,
-    similar_wines: alternatives,
-    decision: completed
-      ? detected
-        ? "matched"
-        : alternatives.length > 0
-          ? "ambiguous"
-          : "unresolved"
-      : undefined,
+    similar_wines: outcome === "partial" ? task.alternatives.map(toWine) : [],
+    decision: DECISION[outcome],
   };
 }
 
@@ -180,6 +213,7 @@ export async function createRecognition(
   const body = new FormData();
   const upload = withMime(file);
   body.append("image", upload, upload.name);
+  body.append("crop", "false");
 
   const response = await fetch(`${config.apiBaseUrl}/recognition`, {
     method: "POST",
